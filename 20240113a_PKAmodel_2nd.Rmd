@@ -1,0 +1,173 @@
+---
+title: "20231223_PKAmodel_2nd"
+output: pdf_document
+date: "2023-12-23"
+---
+
+to do: phosphorylation levels should be at steady state before t = 0
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{R}
+rm(list = ls())
+set.seed(20230106)
+
+library('deSolve')
+library('tidyverse')
+```
+
+## Functions for both simulations and parameter estimation
+
+### ODE function for phosphorylation dependent on kinase and PPTase rate
+dYp_dt = K * (Ytot-Yp)/[(Ytot-Yp)+Km_K] - P * Yp/(Yp+Km_P)
+K: kinase activity
+P: PPTase activity
+Ytot: total substrate concentration
+Yp: phosphorylated substrate concentration
+Km_K: Michaelis constant of kinase
+Km_P: Michaelis constant of PPTase
+```{R}
+Yp_fun = function(t, Yp, pars) {
+ # ODE of phosphorylation change
+  # Yp: vector of concentrations of phosphorylated substrates
+  # pars: named list of Ytot, Km_K, Km_P
+    with(pars, {
+      K = K_fun(t)
+      P = P_fun(t)
+      dYp_dt = K * (Ytot-Yp)/((Ytot-Yp)+Km_K) - P * Yp/(Yp+Km_P)
+    
+      return(list(Yp = dYp_dt))
+  })
+}
+```
+
+
+## Simulation
+Modeling the phosphorylation of different substrates by the same kinase and dephosphorylation by the same phosphatase
+ Substrates have different Km for kinase, but the same for PPTase
+ The kinase changes its activity over time
+ We assume the we know the total amount of each substrate
+ 
+```{R}
+# Define kinase activity (K) and PPTase activity (P) as functions of time
+K_fun = function(t){
+  #K = 0.02 * t
+  #K = ifelse(t > 0, 0.02 * t, 0)
+  K = ifelse(t > 0, exp(-0.2 * t), 0)
+  return(K)
+}
+
+P_fun = function(t){
+  P = rep(1, length(t))
+  return(P)
+}
+```
+
+```{R}
+# initial condition
+Yp_init = c(1, 1)  # initial does not necessarily mean t == 0
+
+# parameters
+p = list(Ytot = c(100, 100), Km_K = c(10, 20), Km_P = c(50, 50))
+```
+
+```{R}
+# Simulation
+t = seq(-20, 500, 1)
+ODEout = as.data.frame(ode(y = Yp_init, times = t, func = Yp_fun, parms = p))
+
+myPal = c('black', 'green', 'orange')
+palette(myPal)
+plot(type = 'n', 0, 0, xlim = c(min(t), max(t)), 
+  ylim= c(0, max(ODEout[, 2:dim(ODEout)[2]])) )
+for(i in 2:dim(ODEout)[2]){
+  lines(ODEout$time, ODEout[, i], col = 1, lwd = 2)
+}
+lines(t, K_fun(t), col = 2, lwd = 2)
+lines(t, P_fun(t), col = 3, lwd = 2)
+legend(x= 0.8 * max(t), y = 0.9 * max(ODEout[, 2]), 
+       legend = c('Yp', 'K', 'P'), col = myPal[1:3], lty = 1)
+```
+Assumed observed data
+```{R}
+t_obs = c(0, 10, 20, 40, 80, 160, 320, 500)
+Yp_obs = ODEout[match(t_obs, ODEout$time),]
+```
+to do: phosphorylation levels should be at steady state before t = 0
+
+
+## Test different parameter choices
+```{R}
+p_toTest = list(
+  p1 = list(Ytot = c(100, 100), Km_K = c(10, 20), Km_P = c(50, 50)), # selected to match simulation data
+  p2 = list(Ytot = c(100, 100), Km_K = c(60, 120), Km_P = c(50, 50))
+)
+
+fits_loDF = list(NULL) #list of data.frames
+fits_loDF[[1]] = as.data.frame(ode(y = Yp_init, times = t, func = Yp_fun, parms = p_toTest[[1]]))
+fits_loDF[[2]] = as.data.frame(ode(y = Yp_init, times = t, func = Yp_fun, parms = p_toTest[[2]]))
+
+myPal = c('black', 'green', 'orange')
+palette(myPal)
+Y_expand = 1.5 # factor by which to expand Y-axis
+plot(type = 'n', 0, 0, xlim = c(min(t), max(t)), 
+  ylim= c(0, Y_expand * max(Yp_obs[, 2:dim(Yp_obs)[2]])), xlab = 'time' )
+for(i in 2:dim(Yp_obs)[2]){
+  points(Yp_obs$time, Yp_obs[,i])
+}
+
+for(mIdx in 1:length(fits_loDF)){
+  ODEout = fits_loDF[[mIdx]]
+  for(i in 2:dim(ODEout)[2]){
+    lines(ODEout$time, ODEout[, i], col = 1, lwd = 2, lty = mIdx)
+  }
+}
+lines(t, K_fun(t), col = 2, lwd = 2)
+lines(t, P_fun(t), col = 3, lwd = 2)
+  
+legend(x= 0.8 * max(t), y = 0.9 * Y_expand * max(Yp_obs[, 2:dim(Yp_obs)[2]]), 
+       legend = c('Yp', 'K', 'P'), col = myPal[1:3], lty = 1)
+```
+
+Function to evaluate model fit using likelihood and assuming fixed relative SD
+```{R}
+loglikFUN = function(par, obsData, ODEfun, Yp_ini){
+  # Function to calculate log-likelihood of observed data for given model,
+   # assuming fixed relative SD
+  #ARGS:
+   # obsData: data.frame of observed data with first column named "time"
+   # par: list of vectors for Ytot, Km_K, Km_P, with one entry per substrate in each vector
+  # RETURNS:
+   # sum of log-likelihoods for all datapoints of all substrates
+  
+  relSD = 0.1
+  
+  modelData_atObsTP = as.data.frame(
+    ode(y = Yp_ini, times = obsData$time, func = ODEfun, parms = par)
+  )
+
+  logLik = rep(NA, dim(obsData)[2] - 1)
+  # for each substrate:
+  for (i in 2:dim(obsData)[2]){
+    logLik[i - 1] = sum(log(
+      dnorm(obsData[, i], mean = modelData_atObsTP[, i], sd = relSD * obsData[, i])))
+  }
+  
+  return(sum(logLik))
+}
+```
+
+Test log-likelihood function
+```{R}
+relNoise = 0.1
+
+loglikFUN(par = p_toTest[[1]], obsData = Yp_obs, ODEfun = Yp_fun, Yp_ini = Yp_init)
+loglikFUN(par = p_toTest[[2]], obsData = Yp_obs, ODEfun = Yp_fun, Yp_ini = Yp_init)
+```
+# Find the best parameter values via optimization
+```{R}
+ini_par = list(Ytot = c(100, 100), Km_K = c(10, 20), Km_P = c(50, 50))
+optim(par = ini_par, fn = loglikFUN, obsData = Yp_obs, ODEfun = Yp_fun, Yp_ini = Yp_init)
+```
